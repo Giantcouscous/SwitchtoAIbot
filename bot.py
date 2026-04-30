@@ -258,7 +258,7 @@ def get_conversation_reply(week: int, exchanges: list, progress: dict) -> str:
     """Get JARVIS's next conversational response."""
     messages = build_context(week, exchanges, progress)
     response = claude.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-sonnet-4-5",
         max_tokens=300,
         system=SYSTEM_PROMPT,
         messages=messages
@@ -292,7 +292,7 @@ def get_final_verdict(week: int, exchanges: list, progress: dict) -> str:
     })
 
     response = claude.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-sonnet-4-5",
         max_tokens=1200,
         system=SYSTEM_PROMPT,
         messages=messages
