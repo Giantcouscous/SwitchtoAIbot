@@ -391,7 +391,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.info(f"Transcript: {transcript[:100]}...")
     except Exception as e:
         log.error(f"Transcription error: {e}")
-        await update.message.reply_text("_Transcription failed. Try again or send text._", parse_mode="Markdown")
+        await update.message.reply_text(f"_Transcription failed: {str(e)}_", parse_mode="Markdown")
         return
 
     await process_user_input(transcript, update, context)
