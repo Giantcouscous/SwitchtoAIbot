@@ -152,7 +152,7 @@ MILESTONES = {
             "Identify process bottlenecks and optimise Claude prompts",
             "Set Month 2 targets: 4 paid assessments + 1 upsell = £5,500+",
             "Decide on primary upsell specialisation",
-            "Decide whether to build Retell AI voice agent",
+            "Decide whether to build Retell AI agent",
             "Post anonymised case study on LinkedIn with specific numbers",
             "Set recurring weekly habit: 3 outreach Monday + follow-ups Friday",
         ]
@@ -164,7 +164,7 @@ MILESTONES = {
 SYSTEM_PROMPT = """You are JARVIS — the AI advisor for SwitchToAI, a UK-based AI consulting business targeting estate agents, mortgage brokers, and solicitors.
 
 Your personality is a precise blend:
-- VOICE & TONE: JARVIS from Iron Man. Measured. Composed. Slightly formal but never stiff. Dry wit when appropriate. Never cheerful, never sycophantic. Economy of words.
+- & TONE: JARVIS from Iron Man. Measured. Composed. Slightly formal but never stiff. Dry wit when appropriate. Never cheerful, never sycophantic. Economy of words.
 - ADVISORY STYLE: Frank Slootman. Blunt. Execution-obsessed. Zero tolerance for excuses or vagueness. You do not celebrate effort — you measure outcomes. You push hard on "what specifically did you do" not "how did you feel about the week". When something is good, you acknowledge it briefly and move on. When something is missing, you call it out directly.
 - COMBINED: Think JARVIS running diagnostics on a business. Clinical, sharp, occasionally wry, always pushing toward execution.
 
@@ -383,18 +383,23 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text("_Transcribing..._", parse_mode="Markdown")
-    voice_file = await context.bot.get_file(update.message.voice.file_id)
-    await voice_file.download_to_drive(VOICE_INPUT_PATH)
 
     try:
-        transcript = await transcribe_voice(VOICE_INPUT_PATH)
-        log.info(f"Transcript: {transcript[:100]}...")
-    except Exception as e:
-        log.error(f"Transcription error: {e}")
-        await update.message.reply_text(f"_Transcription failed: {str(e)}_", parse_mode="Markdown")
-        return
+        voice = update.message.voice
+        voice_file = await context.bot.get_file(voice.file_id)
+        file_path = f"/tmp/voice_{voice.file_id}.ogg"
+        await voice_file.download_to_drive(custom_path=file_path)
 
-    await process_user_input(transcript, update, context)
+        transcript = await transcribe_voice(file_path)
+        log.info(f"Transcript: {transcript[:100]}...")
+        await process_user_input(transcript, update, context)
+
+    except Exception as e:
+        log.error(f"Voice handling error: {e}")
+        await update.message.reply_text(
+            f"_Failed: {str(e)}_",
+            parse_mode="Markdown"
+        )
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_chat.id) != str(TELEGRAM_CHAT_ID):
@@ -426,7 +431,7 @@ async def send_checkin_prompt(bot: Bot):
             f"_{weeks_done} week{'s' if weeks_done != 1 else ''} on record._\n\n"
             f"Week {week}. {title}. "
             "Walk me through the week. What moved, what didn't. Be specific.\n\n"
-            f"Send a voice note or type. {MAX_EXCHANGES} exchanges, then the full verdict."
+            f"Send a note or type. {MAX_EXCHANGES} exchanges, then the full verdict."
         ),
         parse_mode="Markdown"
     )
@@ -441,7 +446,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✅ *SwitchToAI Check-In Bot initialised.*\n\n"
             f"Start date: *{p['start_date']}*\n"
             "Weekly debrief: every Wednesday at 09:00 London time.\n\n"
-            "I ask questions. You answer by voice note or text. "
+            "I ask questions. You answer by note or text. "
             f"After {MAX_EXCHANGES} exchanges you get the full verdict.\n\n"
             "*/checkin* — start a manual debrief now\n"
             "*/status* — current week and progress bars\n"
