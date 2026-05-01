@@ -6,7 +6,7 @@ Mode: Conversational debrief — asks follow-up questions, pushes back,
       then delivers a sharp verdict with ticked checklist and next moves.
 
 Flow:
-  Wednesday 09:00 → bot sends text prompt
+  Tuesday 09:00 → bot sends text prompt
   You reply (voice note or text) → bot transcribes + asks follow-up
   3 exchanges → bot closes the debrief with full analysis
   Progress saved to progress.json for cumulative context
@@ -40,7 +40,7 @@ OPENAI_API_KEY     = os.environ["OPENAI_API_KEY"]
 
 CHECKIN_HOUR   = 9
 CHECKIN_MINUTE = 0
-CHECKIN_DAY    = "wed"
+CHECKIN_DAY    = "Tue"
 TIMEZONE       = "Europe/London"
 
 # How many back-and-forth exchanges before the final verdict
@@ -409,7 +409,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await process_user_input(update.message.text, update, context)
 
 async def send_checkin_prompt(bot: Bot):
-    """Fires on Wednesday 09:00 — starts the debrief."""
+    """Fires on Tuesday 09:00 — starts the debrief."""
     week = current_week()
     title = MILESTONES[week]["title"]
 
@@ -445,7 +445,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = (
             "✅ *SwitchToAI Check-In Bot initialised.*\n\n"
             f"Start date: *{p['start_date']}*\n"
-            "Weekly debrief: every Wednesday at 09:00 London time.\n\n"
+            "Weekly debrief: every Tuesday at 09:00 London time.\n\n"
             "I ask questions. You answer by note or text. "
             f"After {MAX_EXCHANGES} exchanges you get the full verdict.\n\n"
             "*/checkin* — start a manual debrief now\n"
