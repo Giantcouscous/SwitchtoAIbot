@@ -216,9 +216,13 @@ def _db_set(table: str, key: str, value: dict):
 # ── Conversation state ──
 
 def load_conv() -> dict:
-    data = _db_get("bot_conv", "state")
-    return data if data else {"active": False, "exchanges": [], "exchange_count": 0, "week": 1}
-
+    try:
+        data = _db_get("bot_conv", "state")
+        if data and isinstance(data, dict) and "active" in data:
+            return data
+    except Exception as e:
+        log.error(f"load_conv error: {e}")
+    return {"active": False, "exchanges": [], "exchange_count": 0, "week": 1}
 def save_conv(state: dict):
     _db_set("bot_conv", "state", state)
 
@@ -228,8 +232,13 @@ def clear_conv():
 # ── Progress ──
 
 def load_progress() -> dict:
-    data = _db_get("bot_progress", "progress")
-    return data if data else {}
+    try:
+        data = _db_get("bot_progress", "progress")
+        if data and isinstance(data, dict):
+            return data
+    except Exception as e:
+        log.error(f"load_progress error: {e}")
+    return {}
 
 def save_progress(data: dict):
     _db_set("bot_progress", "progress", data)
