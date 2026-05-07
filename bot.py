@@ -543,6 +543,7 @@ async def cmd_progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─── MAIN ────────────────────────────────────────────────────────────────────
 
 async def main():
+    await asyncio.sleep(8)
     log.info("JARVIS initialising...")
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
