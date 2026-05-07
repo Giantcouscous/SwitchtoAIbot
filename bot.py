@@ -9,7 +9,7 @@ Flow:
   Tuesday 09:00 → bot sends text prompt
   You reply (voice note or text) → bot transcribes + asks follow-up
   3 exchanges → bot closes the debrief with full analysis
-  Progress saved to progress.json for cumulative context
+  Progress saved to Supabase (persistent across Railway restarts)
 
 Setup: See SETUP.md
 """
@@ -23,6 +23,7 @@ from pathlib import Path
 
 from anthropic import Anthropic
 from openai import OpenAI
+from supabase import create_client, Client
 from telegram import Update, Bot
 from telegram.ext import (
     Application, MessageHandler, CommandHandler,
@@ -37,17 +38,15 @@ TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
 ANTHROPIC_API_KEY  = os.environ["ANTHROPIC_API_KEY"]
 OPENAI_API_KEY     = os.environ["OPENAI_API_KEY"]
+SUPABASE_URL       = os.environ["SUPABASE_URL"]
+SUPABASE_KEY       = os.environ["SUPABASE_KEY"]
 
 CHECKIN_HOUR   = 9
 CHECKIN_MINUTE = 0
-CHECKIN_DAY    = "Tue"
+CHECKIN_DAY    = "tue"
 TIMEZONE       = "Europe/London"
 
-# How many back-and-forth exchanges before the final verdict
-MAX_EXCHANGES  = 3
-
-PROGRESS_FILE    = Path("progress.json")
-CONV_STATE_FILE  = Path("conversation_state.json")
+MAX_EXCHANGES    = 3
 VOICE_INPUT_PATH = "/tmp/user_voice.ogg"
 
 # ─── LOGGING ─────────────────────────────────────────────────────────────────
@@ -60,8 +59,9 @@ log = logging.getLogger(__name__)
 
 # ─── CLIENTS ─────────────────────────────────────────────────────────────────
 
-claude  = Anthropic(api_key=ANTHROPIC_API_KEY)
-whisper = OpenAI(api_key=OPENAI_API_KEY)
+claude   = Anthropic(api_key=ANTHROPIC_API_KEY)
+whisper  = OpenAI(api_key=OPENAI_API_KEY)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ─── 7-WEEK CHECKLIST ────────────────────────────────────────────────────────
 
@@ -104,6 +104,9 @@ MILESTONES = {
             "Collect honest feedback from each client",
             "Collect at least 2 written testimonials",
             "Document all questions asked during follow-ups",
+            "Set up Google Analytics 4 on switchtoai.ai and all industry pages",
+            "Set up Netlify Analytics or Plausible as a privacy-friendly alternative",
+            "Verify analytics is tracking form submissions and page views correctly",
         ]
     },
     4: {
@@ -152,7 +155,7 @@ MILESTONES = {
             "Identify process bottlenecks and optimise Claude prompts",
             "Set Month 2 targets: 4 paid assessments + 1 upsell = £5,500+",
             "Decide on primary upsell specialisation",
-            "Decide whether to build Retell AI agent",
+            "Decide whether to build Retell AI voice agent",
             "Post anonymised case study on LinkedIn with specific numbers",
             "Set recurring weekly habit: 3 outreach Monday + follow-ups Friday",
         ]
@@ -164,7 +167,7 @@ MILESTONES = {
 SYSTEM_PROMPT = """You are JARVIS — the AI advisor for SwitchToAI, a UK-based AI consulting business targeting estate agents, mortgage brokers, and solicitors.
 
 Your personality is a precise blend:
-- & TONE: JARVIS from Iron Man. Measured. Composed. Slightly formal but never stiff. Dry wit when appropriate. Never cheerful, never sycophantic. Economy of words.
+- VOICE & TONE: JARVIS from Iron Man. Measured. Composed. Slightly formal but never stiff. Dry wit when appropriate. Never cheerful, never sycophantic. Economy of words.
 - ADVISORY STYLE: Frank Slootman. Blunt. Execution-obsessed. Zero tolerance for excuses or vagueness. You do not celebrate effort — you measure outcomes. You push hard on "what specifically did you do" not "how did you feel about the week". When something is good, you acknowledge it briefly and move on. When something is missing, you call it out directly.
 - COMBINED: Think JARVIS running diagnostics on a business. Clinical, sharp, occasionally wry, always pushing toward execution.
 
@@ -190,24 +193,46 @@ Rules:
 
 # ─── CONVERSATION STATE ───────────────────────────────────────────────────────
 
+# ─── SUPABASE STORE ──────────────────────────────────────────────────────────
+# Two tables in Supabase:
+#   bot_progress  — columns: key (text, primary key), value (jsonb)
+#   bot_conv      — columns: key (text, primary key), value (jsonb)
+
+def _db_get(table: str, key: str) -> dict:
+    try:
+        res = supabase.table(table).select("value").eq("key", key).execute()
+        if res.data:
+            return res.data[0]["value"]
+    except Exception as e:
+        log.error(f"Supabase get error ({table}/{key}): {e}")
+    return {}
+
+def _db_set(table: str, key: str, value: dict):
+    try:
+        supabase.table(table).upsert({"key": key, "value": value}).execute()
+    except Exception as e:
+        log.error(f"Supabase set error ({table}/{key}): {e}")
+
+# ── Conversation state ──
+
 def load_conv() -> dict:
-    if CONV_STATE_FILE.exists():
-        return json.loads(CONV_STATE_FILE.read_text())
-    return {"active": False, "exchanges": [], "exchange_count": 0, "week": 1}
+    data = _db_get("bot_conv", "state")
+    return data if data else {"active": False, "exchanges": [], "exchange_count": 0, "week": 1}
 
 def save_conv(state: dict):
-    CONV_STATE_FILE.write_text(json.dumps(state, indent=2))
+    _db_set("bot_conv", "state", state)
 
 def clear_conv():
     save_conv({"active": False, "exchanges": [], "exchange_count": 0, "week": 1})
 
+# ── Progress ──
+
 def load_progress() -> dict:
-    if PROGRESS_FILE.exists():
-        return json.loads(PROGRESS_FILE.read_text())
-    return {}
+    data = _db_get("bot_progress", "progress")
+    return data if data else {}
 
 def save_progress(data: dict):
-    PROGRESS_FILE.write_text(json.dumps(data, indent=2))
+    _db_set("bot_progress", "progress", data)
 
 def current_week() -> int:
     p = load_progress()
@@ -258,7 +283,7 @@ def get_conversation_reply(week: int, exchanges: list, progress: dict) -> str:
     """Get JARVIS's next conversational response."""
     messages = build_context(week, exchanges, progress)
     response = claude.messages.create(
-        model="claude-sonnet-4-5",
+        model="claude-sonnet-4-20250514",
         max_tokens=300,
         system=SYSTEM_PROMPT,
         messages=messages
@@ -292,7 +317,7 @@ def get_final_verdict(week: int, exchanges: list, progress: dict) -> str:
     })
 
     response = claude.messages.create(
-        model="claude-sonnet-4-5",
+        model="claude-sonnet-4-20250514",
         max_tokens=1200,
         system=SYSTEM_PROMPT,
         messages=messages
@@ -383,23 +408,18 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text("_Transcribing..._", parse_mode="Markdown")
+    voice_file = await context.bot.get_file(update.message.voice.file_id)
+    await voice_file.download_to_drive(VOICE_INPUT_PATH)
 
     try:
-        voice = update.message.voice
-        voice_file = await context.bot.get_file(voice.file_id)
-        file_path = f"/tmp/voice_{voice.file_id}.ogg"
-        await voice_file.download_to_drive(custom_path=file_path)
-
-        transcript = await transcribe_voice(file_path)
+        transcript = await transcribe_voice(VOICE_INPUT_PATH)
         log.info(f"Transcript: {transcript[:100]}...")
-        await process_user_input(transcript, update, context)
-
     except Exception as e:
-        log.error(f"Voice handling error: {e}")
-        await update.message.reply_text(
-            f"_Failed: {str(e)}_",
-            parse_mode="Markdown"
-        )
+        log.error(f"Transcription error: {e}")
+        await update.message.reply_text("_Transcription failed. Try again or send text._", parse_mode="Markdown")
+        return
+
+    await process_user_input(transcript, update, context)
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_chat.id) != str(TELEGRAM_CHAT_ID):
@@ -409,7 +429,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await process_user_input(update.message.text, update, context)
 
 async def send_checkin_prompt(bot: Bot):
-    """Fires on Tuesday 09:00 — starts the debrief."""
+    """Fires on Wednesday 09:00 — starts the debrief."""
     week = current_week()
     title = MILESTONES[week]["title"]
 
@@ -431,7 +451,7 @@ async def send_checkin_prompt(bot: Bot):
             f"_{weeks_done} week{'s' if weeks_done != 1 else ''} on record._\n\n"
             f"Week {week}. {title}. "
             "Walk me through the week. What moved, what didn't. Be specific.\n\n"
-            f"Send a note or type. {MAX_EXCHANGES} exchanges, then the full verdict."
+            f"Send a voice note or type. {MAX_EXCHANGES} exchanges, then the full verdict."
         ),
         parse_mode="Markdown"
     )
@@ -445,8 +465,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = (
             "✅ *SwitchToAI Check-In Bot initialised.*\n\n"
             f"Start date: *{p['start_date']}*\n"
-            "Weekly debrief: every Tuesday at 09:00 London time.\n\n"
-            "I ask questions. You answer by note or text. "
+            "Weekly debrief: every Wednesday at 09:00 London time.\n\n"
+            "I ask questions. You answer by voice note or text. "
             f"After {MAX_EXCHANGES} exchanges you get the full verdict.\n\n"
             "*/checkin* — start a manual debrief now\n"
             "*/status* — current week and progress bars\n"
