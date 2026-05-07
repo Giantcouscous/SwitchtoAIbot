@@ -414,18 +414,31 @@ async def process_user_input(user_text: str, update: Update, context: ContextTyp
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_chat.id) != str(TELEGRAM_CHAT_ID):
+        log.info(f"Ignored voice from chat {update.effective_chat.id}")
         return
 
+    log.info("Voice note received — starting transcription flow")
     await update.message.reply_text("_Transcribing..._", parse_mode="Markdown")
-    voice_file = await context.bot.get_file(update.message.voice.file_id)
-    await voice_file.download_to_drive(VOICE_INPUT_PATH)
 
     try:
-        transcript = await transcribe_voice(VOICE_INPUT_PATH)
+        log.info("Getting file from Telegram...")
+        voice = update.message.voice
+        voice_file = await context.bot.get_file(voice.file_id)
+        file_path = f"/tmp/voice_{voice.file_id}.ogg"
+        log.info(f"Downloading to {file_path}...")
+        await voice_file.download_to_drive(custom_path=file_path)
+        log.info("Download complete — sending to Whisper...")
+
+        transcript = await transcribe_voice(file_path)
         log.info(f"Transcript: {transcript[:100]}...")
+        await process_user_input(transcript, update, context)
+
     except Exception as e:
-        log.error(f"Transcription error: {e}")
-        await update.message.reply_text("_Transcription failed. Try again or send text._", parse_mode="Markdown")
+        log.error(f"Voice handling error: {type(e).__name__}: {e}")
+        await update.message.reply_text(
+            f"_Error: {type(e).__name__}: {str(e)}_",
+            parse_mode="Markdown"
+        )
         return
 
     await process_user_input(transcript, update, context)
