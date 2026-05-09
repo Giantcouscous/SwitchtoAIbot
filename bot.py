@@ -94,21 +94,25 @@ MILESTONES = {
         ]
     },
     3: {
-        "title": "First Free Assessments",
-        "tasks": [
-            "Reach out to all 5 identified contacts offering free assessment",
-            "Book and complete 2-3 free assessments",
-            "Run each session on Zoom with Fathom recording (30-45 mins)",
-            "Deliver each report within 48 hours",
-            "Book and run 30-min follow-up call for each assessment",
-            "Collect honest feedback from each client",
-            "Collect at least 2 written testimonials",
-            "Document all questions asked during follow-ups",
-            "Set up Google Analytics 4 on switchtoai.ai and all industry pages",
-            "Set up Netlify Analytics or Plausible as a privacy-friendly alternative",
-            "Verify analytics is tracking form submissions and page views correctly",
-        ]
-    },
+    "title": "First Free Assessments & Business Model Refinement",
+    "tasks": [
+        "Reach out to all 5 identified contacts offering free assessment",
+        "Book and complete 2-3 free assessments",
+        "Run each session on Zoom with built-in transcription (30-45 mins)",
+        "Deliver each report within 48 hours",
+        "Book and run 30-min follow-up call for each assessment",
+        "Collect honest feedback from each client",
+        "Collect at least 2 written testimonials",
+        "Document all questions asked during follow-ups",
+        "Set up Google Analytics 4 on switchtoai.ai and all industry pages",
+        "Verify analytics is tracking form submissions and page views correctly",
+        "Rewrite business plan reflecting updated model and target market",
+        "Redesign homepage form — short entry: name, company, pain point only",
+        "Build tool recommendation logic — pain point input triggers relevant off-the-shelf tool suggestion",
+        "Add call booking option (Calendly) after tool recommendation for full assessment",
+        "Test end-to-end new form flow before going live",
+    ]
+},
     4: {
         "title": "Refine & Prepare to Charge",
         "tasks": [
