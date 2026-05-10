@@ -12,17 +12,15 @@ Flow:
   Progress saved to Supabase (persistent across Railway restarts)
 
 Outside debrief:
-  Voice note saying "add X to week N" → adds task to Supabase milestones
-
-Setup: See SETUP.md
+  Voice note or text "add X to week N" → adds task to Supabase milestones
 """
 
 import os
 import json
 import logging
 import asyncio
+import re
 from datetime import date
-from pathlib import Path
 
 from anthropic import Anthropic
 from openai import OpenAI
@@ -48,7 +46,6 @@ CHECKIN_HOUR   = 9
 CHECKIN_MINUTE = 0
 CHECKIN_DAY    = "tue"
 TIMEZONE       = "Europe/London"
-
 MAX_EXCHANGES  = 3
 
 # ─── LOGGING ─────────────────────────────────────────────────────────────────
@@ -65,8 +62,7 @@ claude   = Anthropic(api_key=ANTHROPIC_API_KEY)
 whisper  = OpenAI(api_key=OPENAI_API_KEY)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ─── HARDCODED MILESTONE FALLBACK ────────────────────────────────────────────
-# Used if bot_milestones table doesn't exist in Supabase yet
+# ─── MILESTONES FALLBACK ─────────────────────────────────────────────────────
 
 MILESTONES_FALLBACK = {
     1: {
@@ -169,10 +165,9 @@ MILESTONES_FALLBACK = {
     },
 }
 
-# ─── MILESTONES — SUPABASE WITH FALLBACK ─────────────────────────────────────
+# ─── MILESTONES ──────────────────────────────────────────────────────────────
 
 def load_milestones() -> dict:
-    """Load milestones from Supabase bot_milestones table, fall back to hardcoded."""
     try:
         res = supabase.table("bot_milestones").select("*").order("week").execute()
         if res.data:
@@ -189,42 +184,33 @@ def load_milestones() -> dict:
     return MILESTONES_FALLBACK
 
 def get_milestones() -> dict:
-    """Get milestones — cached per session to avoid repeated DB calls."""
     if not hasattr(get_milestones, "_cache"):
         get_milestones._cache = load_milestones()
     return get_milestones._cache
 
+def invalidate_milestones_cache():
+    if hasattr(get_milestones, "_cache"):
+        del get_milestones._cache
+
 def add_task_to_week(week: int, task: str) -> bool:
-    """Add a task to a specific week in Supabase bot_milestones."""
     try:
-        # Get current tasks for that week
         res = supabase.table("bot_milestones").select("tasks").eq("week", week).execute()
         if not res.data:
             log.error(f"Week {week} not found in bot_milestones")
             return False
-
         current_tasks = res.data[0]["tasks"]
         if isinstance(current_tasks, str):
             current_tasks = json.loads(current_tasks)
-
-        # Append new task
         current_tasks.append(task)
-
-        # Update in Supabase
         supabase.table("bot_milestones").update({"tasks": current_tasks}).eq("week", week).execute()
-
-        # Invalidate cache so next load picks up the new task
-        if hasattr(get_milestones, "_cache"):
-            del get_milestones._cache
-
+        invalidate_milestones_cache()
         log.info(f"Added task to Week {week}: {task}")
         return True
-
     except Exception as e:
         log.error(f"add_task_to_week error: {e}")
         return False
 
-# ─── SYSTEM PROMPT ───────────────────────────────────────────────────────────
+# ─── SYSTEM PROMPTS ───────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """You are JARVIS — the AI advisor for SwitchToAI, a UK-based AI consulting business targeting estate agents, mortgage brokers, and solicitors.
 
@@ -250,31 +236,30 @@ Rules:
 4. Only give the full analysis verdict when explicitly told to (FINAL_VERDICT instruction)
 5. During conversation: ask ONE focused follow-up question per exchange
 6. You have memory of previous weeks — reference them when relevant
-7. Occasional dry humour is permitted. Warmth is not.
-8. When producing voice-ready text: no markdown, no bullet points, no symbols. Plain spoken sentences only."""
+7. Occasional dry humour is permitted. Warmth is not."""
 
-TASK_DETECTION_PROMPT = """You analyse a voice note transcript to detect if the user wants to add a task to their weekly plan.
+TASK_DETECTION_PROMPT = """You analyse text or a voice note transcript to detect if the user wants to add a task to their weekly plan.
 
-If the transcript is a task addition request, extract:
+If it IS a task addition request, extract:
 1. The week number (1-7)
 2. The clean task text (concise action item, starts with a verb, max 15 words)
 
-Return ONLY valid JSON in one of these two formats:
+Return ONLY valid JSON — no markdown, no explanation, nothing else.
 
-If it IS a task addition:
+Format if IS a task:
 {"is_task": true, "week": 3, "task": "Follow up with Guillaume about testimonial"}
 
-If it is NOT a task addition (it's a debrief response or something else):
+Format if NOT a task:
 {"is_task": false}
 
 Examples:
 "add to week 3 follow up with Guillaume about his testimonial" → {"is_task": true, "week": 3, "task": "Follow up with Guillaume about testimonial"}
 "add set up Google Analytics to week 3" → {"is_task": true, "week": 3, "task": "Set up Google Analytics"}
-"week 2 needs a task about testing the Claude prompt" → {"is_task": true, "week": 2, "task": "Test the Claude prompt output quality"}
-"yeah I managed to get the website live this week" → {"is_task": false}
+"week 2 add task test the Claude prompt" → {"is_task": true, "week": 2, "task": "Test the Claude prompt output quality"}
+"yeah I managed to get the website live" → {"is_task": false}
 "I haven't done the CRM yet" → {"is_task": false}"""
 
-# ─── SUPABASE STORE ──────────────────────────────────────────────────────────
+# ─── SUPABASE ────────────────────────────────────────────────────────────────
 
 def _db_get(table: str, key: str) -> dict:
     try:
@@ -338,20 +323,53 @@ async def transcribe_voice(file_path: str) -> str:
 
 # ─── TASK DETECTION ──────────────────────────────────────────────────────────
 
-def detect_task_addition(transcript: str) -> dict:
-    """Use Claude to detect if transcript is a task addition command."""
+def detect_task_addition(text: str) -> dict:
     try:
         response = claude.messages.create(
             model="claude-sonnet-4-5",
-            max_tokens=100,
+            max_tokens=150,
             system=TASK_DETECTION_PROMPT,
-            messages=[{"role": "user", "content": transcript}]
+            messages=[{"role": "user", "content": text}]
         )
         raw = response.content[0].text.strip()
+        # Strip any accidental markdown
+        raw = re.sub(r"```json|```", "", raw).strip()
         return json.loads(raw)
     except Exception as e:
         log.error(f"detect_task_addition error: {e}")
         return {"is_task": False}
+
+async def handle_task_addition(text: str, update: Update):
+    """Shared logic for adding a task from voice or text."""
+    detection = detect_task_addition(text)
+    log.info(f"Task detection result: {detection}")
+
+    if detection.get("is_task") and detection.get("week") and detection.get("task"):
+        week = int(detection["week"])
+        task = detection["task"]
+        milestones = get_milestones()
+
+        if week not in milestones:
+            await update.message.reply_text(
+                f"_Week {week} doesn't exist. Valid weeks are 1-7._",
+                parse_mode="Markdown"
+            )
+            return True
+
+        success = add_task_to_week(week, task)
+        if success:
+            await update.message.reply_text(
+                f"✅ *Added to Week {week}*\n\n_{task}_",
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text(
+                "_Failed to add task. Try again._",
+                parse_mode="Markdown"
+            )
+        return True
+
+    return False  # Not a task addition
 
 # ─── CLAUDE CONVERSATION ─────────────────────────────────────────────────────
 
@@ -439,9 +457,6 @@ def save_week_progress(week: int, text_report: str, progress: dict) -> dict:
         elif "⬜" in text_report and key in report_lower:
             missed.append(task)
 
-    ticked_count = text_report.count("✅")
-    missed_count = text_report.count("⬜")
-
     if "weeks" not in progress:
         progress["weeks"] = {}
 
@@ -449,17 +464,17 @@ def save_week_progress(week: int, text_report: str, progress: dict) -> dict:
         "date": date.today().isoformat(),
         "ticked": ticked,
         "missed": missed,
-        "ticked_count": ticked_count,
+        "ticked_count": text_report.count("✅"),
         "total_tasks": len(tasks),
-        "missed_count": missed_count,
+        "missed_count": text_report.count("⬜"),
     }
     save_progress(progress)
     return progress
 
-# ─── CORE CONVERSATION HANDLER ───────────────────────────────────────────────
+# ─── CONVERSATION HANDLER ────────────────────────────────────────────────────
 
 async def process_user_input(user_text: str, update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conv = load_progress and load_conv()
+    conv = load_conv()
     progress = load_progress()
 
     if not conv["active"]:
@@ -489,11 +504,10 @@ async def process_user_input(user_text: str, update: Update, context: ContextTyp
         save_conv(conv)
         await update.message.reply_text(reply, parse_mode="Markdown")
 
-# ─── TELEGRAM HANDLERS ───────────────────────────────────────────────────────
+# ─── HANDLERS ────────────────────────────────────────────────────────────────
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_chat.id) != str(TELEGRAM_CHAT_ID):
-        log.info(f"Ignored voice from chat {update.effective_chat.id}")
         return
 
     log.info("Voice note received")
@@ -509,47 +523,20 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         transcript = await transcribe_voice(file_path)
         log.info(f"Transcript: {transcript[:100]}...")
 
-        # Check if debrief is active
         conv = load_conv()
         if conv["active"]:
-            # Inside a debrief — process as normal
             await process_user_input(transcript, update, context)
         else:
-            # Outside a debrief — check if it's a task addition
-            detection = detect_task_addition(transcript)
-            if detection.get("is_task") and detection.get("week") and detection.get("task"):
-                week = int(detection["week"])
-                task = detection["task"]
-                milestones = get_milestones()
-
-                if week not in milestones:
-                    await update.message.reply_text(
-                        f"_Week {week} doesn't exist. Valid weeks are 1-7._",
-                        parse_mode="Markdown"
-                    )
-                    return
-
-                success = add_task_to_week(week, task)
-                if success:
-                    await update.message.reply_text(
-                        f"✅ *Added to Week {week}*\n\n_{task}_",
-                        parse_mode="Markdown"
-                    )
-                else:
-                    await update.message.reply_text(
-                        "_Failed to add task. Try again._",
-                        parse_mode="Markdown"
-                    )
-            else:
-                # Not a task addition and no active debrief
+            handled = await handle_task_addition(transcript, update)
+            if not handled:
                 await update.message.reply_text(
-                    "_No active debrief. Send /checkin to start your weekly review._\n"
+                    "_No active debrief. Send /checkin to start._\n"
                     "_Or say \"add [task] to week [N]\" to add a task._",
                     parse_mode="Markdown"
                 )
 
     except Exception as e:
-        log.error(f"Voice handling error: {type(e).__name__}: {e}")
+        log.error(f"Voice error: {type(e).__name__}: {e}")
         await update.message.reply_text(
             f"_Error: {type(e).__name__}: {str(e)}_",
             parse_mode="Markdown"
@@ -558,8 +545,6 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_chat.id) != str(TELEGRAM_CHAT_ID):
         return
-    if update.message.text.startswith("/"):
-        return
 
     text = update.message.text.strip()
     conv = load_conv()
@@ -567,32 +552,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if conv["active"]:
         await process_user_input(text, update, context)
     else:
-        # Check if it's a task addition via text
-        detection = detect_task_addition(text)
-        if detection.get("is_task") and detection.get("week") and detection.get("task"):
-            week = int(detection["week"])
-            task = detection["task"]
-            milestones = get_milestones()
-
-            if week not in milestones:
-                await update.message.reply_text(
-                    f"_Week {week} doesn't exist. Valid weeks are 1-7._",
-                    parse_mode="Markdown"
-                )
-                return
-
-            success = add_task_to_week(week, task)
-            if success:
-                await update.message.reply_text(
-                    f"✅ *Added to Week {week}*\n\n_{task}_",
-                    parse_mode="Markdown"
-                )
-            else:
-                await update.message.reply_text(
-                    "_Failed to add task. Try again._",
-                    parse_mode="Markdown"
-                )
-        else:
+        handled = await handle_task_addition(text, update)
+        if not handled:
             await update.message.reply_text(
                 "_No active debrief. Send /checkin to start._\n"
                 "_Or say \"add [task] to week [N]\" to add a task._",
@@ -604,12 +565,7 @@ async def send_checkin_prompt(bot: Bot):
     milestones = get_milestones()
     title = milestones.get(week, {}).get("title", f"Week {week}")
 
-    save_conv({
-        "active": True,
-        "exchanges": [],
-        "exchange_count": 0,
-        "week": week
-    })
+    save_conv({"active": True, "exchanges": [], "exchange_count": 0, "week": week})
 
     progress = load_progress()
     weeks_done = len(progress.get("weeks", {}))
@@ -627,6 +583,8 @@ async def send_checkin_prompt(bot: Bot):
     )
     log.info(f"Week {week} debrief started")
 
+# ─── COMMANDS ────────────────────────────────────────────────────────────────
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     p = load_progress()
     if "start_date" not in p:
@@ -636,13 +594,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✅ *SwitchToAI Check-In Bot initialised.*\n\n"
             f"Start date: *{p['start_date']}*\n"
             "Weekly debrief: every Tuesday at 09:00 London time.\n\n"
-            "I ask questions. You answer by voice note or text. "
             f"After {MAX_EXCHANGES} exchanges you get the full verdict.\n\n"
-            "*/checkin* — start a manual debrief now\n"
-            "*/status* — current week and progress bars\n"
+            "*/checkin* — start a manual debrief\n"
+            "*/status* — progress bars\n"
             "*/progress* — full history\n"
+            "*/showtasks 3* — show tasks for a week\n"
             "*/cancel* — end current debrief\n\n"
-            "_Outside a debrief, say \"add [task] to week [N]\" to update your plan._"
+            "_Outside a debrief: say or type \"add [task] to week [N]\"_"
         )
     else:
         msg = f"Already running. Week {current_week()}. Use /checkin to debrief now."
@@ -660,7 +618,6 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     p = load_progress()
     week = current_week()
-    milestones = get_milestones()
     lines = [f"📊 *Status — Week {week} of 7*\n"]
     for w in range(1, week + 1):
         wk = str(w)
@@ -693,29 +650,50 @@ async def cmd_progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 async def cmd_showtasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show all tasks for a specific week. Usage: /showtasks 3"""
     if str(update.effective_chat.id) != str(TELEGRAM_CHAT_ID):
         return
 
-    args = context.args
-    if not args or not args[0].isdigit():
+    log.info(f"cmd_showtasks called — args: {context.args} — text: {update.message.text}")
+
+    # Parse week number — try context.args first, then parse from message text
+    week_num = None
+
+    if context.args:
+        for arg in context.args:
+            if arg.isdigit():
+                week_num = int(arg)
+                break
+
+    if not week_num:
+        # Fallback: extract number from raw message text e.g. "/showtasks 3"
+        match = re.search(r'\d+', update.message.text)
+        if match:
+            week_num = int(match.group())
+
+    milestones = get_milestones()
+
+    if not week_num:
+        # No number — show all weeks summary
+        lines = ["📋 *All Weeks*\n"]
+        for w in sorted(milestones.keys()):
+            data = milestones[w]
+            lines.append(f"*Week {w}* — {data['title']} ({len(data['tasks'])} tasks)")
+        lines.append("\n_Use /showtasks 3 to see a specific week_")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return
+
+    if week_num not in milestones:
         await update.message.reply_text(
-            "_Usage: /showtasks N — e.g. /showtasks 3_",
+            f"_Week {week_num} not found. Valid weeks: 1-7._",
             parse_mode="Markdown"
         )
         return
 
-    week = int(args[0])
-    milestones = get_milestones()
-
-    if week not in milestones:
-        await update.message.reply_text(f"_Week {week} not found._", parse_mode="Markdown")
-        return
-
-    data = milestones[week]
-    lines = [f"📋 *Week {week} — {data['title']}*\n"]
+    data = milestones[week_num]
+    lines = [f"📋 *Week {week_num} — {data['title']}*\n"]
     for i, task in enumerate(data["tasks"], 1):
         lines.append(f"{i}. {task}")
+    lines.append(f"\n_{len(data['tasks'])} tasks total_")
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
@@ -727,12 +705,15 @@ async def main():
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start",      cmd_start))
-    app.add_handler(CommandHandler("checkin",    cmd_checkin))
-    app.add_handler(CommandHandler("cancel",     cmd_cancel))
-    app.add_handler(CommandHandler("status",     cmd_status))
-    app.add_handler(CommandHandler("progress",   cmd_progress))
-    app.add_handler(CommandHandler("showtasks",  cmd_showtasks))
+    # Commands must be registered before the text catch-all
+    app.add_handler(CommandHandler("start",     cmd_start))
+    app.add_handler(CommandHandler("checkin",   cmd_checkin))
+    app.add_handler(CommandHandler("cancel",    cmd_cancel))
+    app.add_handler(CommandHandler("status",    cmd_status))
+    app.add_handler(CommandHandler("progress",  cmd_progress))
+    app.add_handler(CommandHandler("showtasks", cmd_showtasks))
+
+    # Media and text — text handler uses ~filters.COMMAND to avoid intercepting commands
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
