@@ -701,10 +701,9 @@ async def cmd_showtasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def main():
     # Kill any existing bot session before starting
-    temp_bot = Bot(token=TELEGRAM_BOT_TOKEN)
-    await temp_bot.delete_webhook(drop_pending_updates=True)
-    await asyncio.sleep(3)
-    await temp_bot.close()
+temp_bot = Bot(token=TELEGRAM_BOT_TOKEN)
+await temp_bot.delete_webhook(drop_pending_updates=True)
+await asyncio.sleep(3)
 
     await asyncio.sleep(8)
     log.info("JARVIS initialising...")
