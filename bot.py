@@ -650,6 +650,7 @@ async def cmd_progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 async def cmd_showtasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log.info(f"CMD_SHOWTASKS TRIGGERED — chat: {update.effective_chat.id} — text: {update.message.text}")
     if str(update.effective_chat.id) != str(TELEGRAM_CHAT_ID):
         return
 
