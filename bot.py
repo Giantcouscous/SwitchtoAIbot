@@ -11,6 +11,9 @@ Flow:
   3 exchanges → bot closes the debrief with full analysis
   Progress saved to Supabase (persistent across Railway restarts)
 
+Outside debrief:
+  Voice note saying "add X to week N" → adds task to Supabase milestones
+
 Setup: See SETUP.md
 """
 
@@ -46,8 +49,7 @@ CHECKIN_MINUTE = 0
 CHECKIN_DAY    = "tue"
 TIMEZONE       = "Europe/London"
 
-MAX_EXCHANGES    = 3
-VOICE_INPUT_PATH = "/tmp/user_voice.ogg"
+MAX_EXCHANGES  = 3
 
 # ─── LOGGING ─────────────────────────────────────────────────────────────────
 
@@ -63,9 +65,10 @@ claude   = Anthropic(api_key=ANTHROPIC_API_KEY)
 whisper  = OpenAI(api_key=OPENAI_API_KEY)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ─── 7-WEEK CHECKLIST ────────────────────────────────────────────────────────
+# ─── HARDCODED MILESTONE FALLBACK ────────────────────────────────────────────
+# Used if bot_milestones table doesn't exist in Supabase yet
 
-MILESTONES = {
+MILESTONES_FALLBACK = {
     1: {
         "title": "Foundation & Digital Presence",
         "tasks": [
@@ -73,8 +76,8 @@ MILESTONES = {
             "Deploy the landing page HTML",
             "Set up Tally.so form with 5 fields, connected to email",
             "Replace placeholder form on site with live Tally embed",
-            "Set up ahmed@switchtoai.ai on Zoho Mail free plan",
-            "Set up Fathom.ai free account, connected to Google Calendar",
+            "Set up hello@switchtoai.ai via Cloudflare Email Routing",
+            "Set up transcription tool connected to Google Calendar",
             "Download and customise Gamma assessment template with SwitchToAI branding",
             "Draft intake question bank (15-20 questions)",
             "Set up Notion CRM: Name, Company, Industry, Status, Notes, Next Action",
@@ -94,25 +97,25 @@ MILESTONES = {
         ]
     },
     3: {
-    "title": "First Free Assessments & Business Model Refinement",
-    "tasks": [
-        "Reach out to all 5 identified contacts offering free assessment",
-        "Book and complete 2-3 free assessments",
-        "Run each session on Zoom with built-in transcription (30-45 mins)",
-        "Deliver each report within 48 hours",
-        "Book and run 30-min follow-up call for each assessment",
-        "Collect honest feedback from each client",
-        "Collect at least 2 written testimonials",
-        "Document all questions asked during follow-ups",
-        "Set up Google Analytics 4 on switchtoai.ai and all industry pages",
-        "Verify analytics is tracking form submissions and page views correctly",
-        "Rewrite business plan reflecting updated model and target market",
-        "Redesign homepage form — short entry: name, company, pain point only",
-        "Build tool recommendation logic — pain point input triggers relevant off-the-shelf tool suggestion",
-        "Add call booking option (Calendly) after tool recommendation for full assessment",
-        "Test end-to-end new form flow before going live",
-    ]
-},
+        "title": "First Free Assessments & Business Model Refinement",
+        "tasks": [
+            "Reach out to all 5 identified contacts offering free assessment",
+            "Book and complete 2-3 free assessments",
+            "Run each session on Zoom with built-in transcription (30-45 mins)",
+            "Deliver each report within 48 hours",
+            "Book and run 30-min follow-up call for each assessment",
+            "Collect honest feedback from each client",
+            "Collect at least 2 written testimonials",
+            "Document all questions asked during follow-ups",
+            "Set up Google Analytics 4 on switchtoai.ai and all industry pages",
+            "Verify analytics is tracking form submissions and page views correctly",
+            "Rewrite business plan reflecting updated model and target market",
+            "Redesign homepage form — short entry: name, company, pain point only",
+            "Build tool recommendation logic — pain point input triggers relevant off-the-shelf tool suggestion",
+            "Add call booking option (Calendly) after tool recommendation for full assessment",
+            "Test end-to-end new form flow before going live",
+        ]
+    },
     4: {
         "title": "Refine & Prepare to Charge",
         "tasks": [
@@ -123,7 +126,7 @@ MILESTONES = {
             "Set up Calendly with Assessment Call and Follow-Up Call meeting types",
             "Add Calendly link to Tally form confirmation email",
             "Run 1 more free assessment with upsell conversation attempt",
-            "Set price at £500 for first paying clients",
+            "Set price at £1,250 for first paying clients",
         ]
     },
     5: {
@@ -134,14 +137,14 @@ MILESTONES = {
             "Deliver the door-knocking opening line to at least 3 businesses",
             "Post a LinkedIn insight from one of the free assessments",
             "Follow up with all website form submissions",
-            "Deliver first paid assessment at £500",
+            "Deliver first paid assessment at £1,250",
             "Present upsell opportunity with written one-page proposal",
         ]
     },
     6: {
         "title": "Scale Outreach & Land First Upsell",
         "tasks": [
-            "Raise price to £1,000 per assessment",
+            "Raise price to £1,500 per assessment",
             "Run 2-3 paid assessments this week",
             "Follow up on all Week 5 upsell conversations with written proposals",
             "Close first upsell project at £1,500+",
@@ -165,6 +168,61 @@ MILESTONES = {
         ]
     },
 }
+
+# ─── MILESTONES — SUPABASE WITH FALLBACK ─────────────────────────────────────
+
+def load_milestones() -> dict:
+    """Load milestones from Supabase bot_milestones table, fall back to hardcoded."""
+    try:
+        res = supabase.table("bot_milestones").select("*").order("week").execute()
+        if res.data:
+            milestones = {}
+            for row in res.data:
+                milestones[row["week"]] = {
+                    "title": row["title"],
+                    "tasks": row["tasks"] if isinstance(row["tasks"], list) else json.loads(row["tasks"])
+                }
+            log.info(f"Loaded {len(milestones)} weeks from Supabase milestones")
+            return milestones
+    except Exception as e:
+        log.warning(f"Could not load milestones from Supabase, using fallback: {e}")
+    return MILESTONES_FALLBACK
+
+def get_milestones() -> dict:
+    """Get milestones — cached per session to avoid repeated DB calls."""
+    if not hasattr(get_milestones, "_cache"):
+        get_milestones._cache = load_milestones()
+    return get_milestones._cache
+
+def add_task_to_week(week: int, task: str) -> bool:
+    """Add a task to a specific week in Supabase bot_milestones."""
+    try:
+        # Get current tasks for that week
+        res = supabase.table("bot_milestones").select("tasks").eq("week", week).execute()
+        if not res.data:
+            log.error(f"Week {week} not found in bot_milestones")
+            return False
+
+        current_tasks = res.data[0]["tasks"]
+        if isinstance(current_tasks, str):
+            current_tasks = json.loads(current_tasks)
+
+        # Append new task
+        current_tasks.append(task)
+
+        # Update in Supabase
+        supabase.table("bot_milestones").update({"tasks": current_tasks}).eq("week", week).execute()
+
+        # Invalidate cache so next load picks up the new task
+        if hasattr(get_milestones, "_cache"):
+            del get_milestones._cache
+
+        log.info(f"Added task to Week {week}: {task}")
+        return True
+
+    except Exception as e:
+        log.error(f"add_task_to_week error: {e}")
+        return False
 
 # ─── SYSTEM PROMPT ───────────────────────────────────────────────────────────
 
@@ -195,12 +253,28 @@ Rules:
 7. Occasional dry humour is permitted. Warmth is not.
 8. When producing voice-ready text: no markdown, no bullet points, no symbols. Plain spoken sentences only."""
 
-# ─── CONVERSATION STATE ───────────────────────────────────────────────────────
+TASK_DETECTION_PROMPT = """You analyse a voice note transcript to detect if the user wants to add a task to their weekly plan.
+
+If the transcript is a task addition request, extract:
+1. The week number (1-7)
+2. The clean task text (concise action item, starts with a verb, max 15 words)
+
+Return ONLY valid JSON in one of these two formats:
+
+If it IS a task addition:
+{"is_task": true, "week": 3, "task": "Follow up with Guillaume about testimonial"}
+
+If it is NOT a task addition (it's a debrief response or something else):
+{"is_task": false}
+
+Examples:
+"add to week 3 follow up with Guillaume about his testimonial" → {"is_task": true, "week": 3, "task": "Follow up with Guillaume about testimonial"}
+"add set up Google Analytics to week 3" → {"is_task": true, "week": 3, "task": "Set up Google Analytics"}
+"week 2 needs a task about testing the Claude prompt" → {"is_task": true, "week": 2, "task": "Test the Claude prompt output quality"}
+"yeah I managed to get the website live this week" → {"is_task": false}
+"I haven't done the CRM yet" → {"is_task": false}"""
 
 # ─── SUPABASE STORE ──────────────────────────────────────────────────────────
-# Two tables in Supabase:
-#   bot_progress  — columns: key (text, primary key), value (jsonb)
-#   bot_conv      — columns: key (text, primary key), value (jsonb)
 
 def _db_get(table: str, key: str) -> dict:
     try:
@@ -217,8 +291,6 @@ def _db_set(table: str, key: str, value: dict):
     except Exception as e:
         log.error(f"Supabase set error ({table}/{key}): {e}")
 
-# ── Conversation state ──
-
 def load_conv() -> dict:
     try:
         data = _db_get("bot_conv", "state")
@@ -227,13 +299,12 @@ def load_conv() -> dict:
     except Exception as e:
         log.error(f"load_conv error: {e}")
     return {"active": False, "exchanges": [], "exchange_count": 0, "week": 1}
+
 def save_conv(state: dict):
     _db_set("bot_conv", "state", state)
 
 def clear_conv():
     save_conv({"active": False, "exchanges": [], "exchange_count": 0, "week": 1})
-
-# ── Progress ──
 
 def load_progress() -> dict:
     try:
@@ -265,11 +336,28 @@ async def transcribe_voice(file_path: str) -> str:
         )
     return result.text
 
+# ─── TASK DETECTION ──────────────────────────────────────────────────────────
+
+def detect_task_addition(transcript: str) -> dict:
+    """Use Claude to detect if transcript is a task addition command."""
+    try:
+        response = claude.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=100,
+            system=TASK_DETECTION_PROMPT,
+            messages=[{"role": "user", "content": transcript}]
+        )
+        raw = response.content[0].text.strip()
+        return json.loads(raw)
+    except Exception as e:
+        log.error(f"detect_task_addition error: {e}")
+        return {"is_task": False}
+
 # ─── CLAUDE CONVERSATION ─────────────────────────────────────────────────────
 
 def build_context(week: int, exchanges: list, progress: dict) -> list:
-    """Build the full message history for Claude."""
-    checklist = MILESTONES[week]
+    milestones = get_milestones()
+    checklist = milestones.get(week, {"title": f"Week {week}", "tasks": []})
     tasks_str = "\n".join(f"- {t}" for t in checklist["tasks"])
 
     history_str = ""
@@ -277,7 +365,8 @@ def build_context(week: int, exchanges: list, progress: dict) -> list:
         wk = str(w)
         if wk in progress.get("weeks", {}):
             e = progress["weeks"][wk]
-            history_str += f"\nWeek {w} ({MILESTONES[w]['title']}): {e['ticked_count']}/{e['total_tasks']} tasks completed."
+            week_title = milestones.get(w, {}).get("title", f"Week {w}")
+            history_str += f"\nWeek {w} ({week_title}): {e['ticked_count']}/{e['total_tasks']} tasks completed."
             if e.get("missed"):
                 history_str += f" Outstanding: {', '.join(e['missed'][:3])}"
 
@@ -293,7 +382,6 @@ def build_context(week: int, exchanges: list, progress: dict) -> list:
     return messages
 
 def get_conversation_reply(week: int, exchanges: list, progress: dict) -> str:
-    """Get JARVIS's next conversational response."""
     messages = build_context(week, exchanges, progress)
     response = claude.messages.create(
         model="claude-sonnet-4-5",
@@ -304,10 +392,10 @@ def get_conversation_reply(week: int, exchanges: list, progress: dict) -> str:
     return response.content[0].text
 
 def get_final_verdict(week: int, exchanges: list, progress: dict) -> str:
-    """Get the final structured verdict as a text report."""
+    milestones = get_milestones()
     messages = build_context(week, exchanges, progress)
+    checklist_tasks = "\n".join(f"- {t}" for t in milestones.get(week, {}).get("tasks", []))
 
-    checklist_tasks = "\n".join(f"- {t}" for t in MILESTONES[week]["tasks"])
     messages.append({
         "role": "user",
         "content": (
@@ -338,13 +426,12 @@ def get_final_verdict(week: int, exchanges: list, progress: dict) -> str:
     return response.content[0].text
 
 def save_week_progress(week: int, text_report: str, progress: dict) -> dict:
-    """Parse ticked/missed from verdict and save."""
+    milestones = get_milestones()
     ticked, missed = [], []
-    tasks = MILESTONES[week]["tasks"]
+    tasks = milestones.get(week, {}).get("tasks", [])
     report_lower = text_report.lower()
 
     for task in tasks:
-        # Simple heuristic: if the task words appear near a tick emoji
         task_words = task.lower().split()[:4]
         key = " ".join(task_words)
         if "✅" in text_report and key in report_lower:
@@ -352,7 +439,6 @@ def save_week_progress(week: int, text_report: str, progress: dict) -> dict:
         elif "⬜" in text_report and key in report_lower:
             missed.append(task)
 
-    # Fallback count from report
     ticked_count = text_report.count("✅")
     missed_count = text_report.count("⬜")
 
@@ -373,45 +459,34 @@ def save_week_progress(week: int, text_report: str, progress: dict) -> dict:
 # ─── CORE CONVERSATION HANDLER ───────────────────────────────────────────────
 
 async def process_user_input(user_text: str, update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle one turn of the conversation."""
-    chat_id = str(update.effective_chat.id)
-    conv = load_conv()
+    conv = load_progress and load_conv()
     progress = load_progress()
 
     if not conv["active"]:
-        # Not in a debrief — ignore or prompt them to use /checkin
         await update.message.reply_text(
-            "_No active debrief. Send /checkin to start your weekly review._",
+            "_No active debrief. Send /checkin to start your weekly review._\n"
+            "_Or say \"add [task] to week [N]\" to add a task._",
             parse_mode="Markdown"
         )
         return
 
     week = conv["week"]
+    milestones = get_milestones()
 
-    # Add user turn to exchanges
     conv["exchanges"].append({"role": "user", "content": user_text})
     conv["exchange_count"] += 1
 
     if conv["exchange_count"] >= MAX_EXCHANGES:
-        # Final verdict time
         await update.message.reply_text("_Compiling your debrief..._", parse_mode="Markdown")
         text_report = get_final_verdict(week, conv["exchanges"], progress)
-
-        header = f"📋 *Week {week} Debrief — {MILESTONES[week]['title']}*\n\n"
+        header = f"📋 *Week {week} Debrief — {milestones.get(week, {}).get('title', '')}*\n\n"
         await update.message.reply_text(header + text_report, parse_mode="Markdown")
-
-        # Save progress and clear conversation
         save_week_progress(week, text_report, progress)
         clear_conv()
-
     else:
-        # Continue conversation
         reply = get_conversation_reply(week, conv["exchanges"], progress)
-
-        # Add assistant turn to exchanges and save
         conv["exchanges"].append({"role": "assistant", "content": reply})
         save_conv(conv)
-
         await update.message.reply_text(reply, parse_mode="Markdown")
 
 # ─── TELEGRAM HANDLERS ───────────────────────────────────────────────────────
@@ -421,21 +496,57 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.info(f"Ignored voice from chat {update.effective_chat.id}")
         return
 
-    log.info("Voice note received — starting transcription flow")
+    log.info("Voice note received")
     await update.message.reply_text("_Transcribing..._", parse_mode="Markdown")
 
     try:
-        log.info("Getting file from Telegram...")
         voice = update.message.voice
         voice_file = await context.bot.get_file(voice.file_id)
         file_path = f"/tmp/voice_{voice.file_id}.ogg"
-        log.info(f"Downloading to {file_path}...")
         await voice_file.download_to_drive(custom_path=file_path)
-        log.info("Download complete — sending to Whisper...")
+        log.info("Download complete")
 
         transcript = await transcribe_voice(file_path)
         log.info(f"Transcript: {transcript[:100]}...")
-        await process_user_input(transcript, update, context)
+
+        # Check if debrief is active
+        conv = load_conv()
+        if conv["active"]:
+            # Inside a debrief — process as normal
+            await process_user_input(transcript, update, context)
+        else:
+            # Outside a debrief — check if it's a task addition
+            detection = detect_task_addition(transcript)
+            if detection.get("is_task") and detection.get("week") and detection.get("task"):
+                week = int(detection["week"])
+                task = detection["task"]
+                milestones = get_milestones()
+
+                if week not in milestones:
+                    await update.message.reply_text(
+                        f"_Week {week} doesn't exist. Valid weeks are 1-7._",
+                        parse_mode="Markdown"
+                    )
+                    return
+
+                success = add_task_to_week(week, task)
+                if success:
+                    await update.message.reply_text(
+                        f"✅ *Added to Week {week}*\n\n_{task}_",
+                        parse_mode="Markdown"
+                    )
+                else:
+                    await update.message.reply_text(
+                        "_Failed to add task. Try again._",
+                        parse_mode="Markdown"
+                    )
+            else:
+                # Not a task addition and no active debrief
+                await update.message.reply_text(
+                    "_No active debrief. Send /checkin to start your weekly review._\n"
+                    "_Or say \"add [task] to week [N]\" to add a task._",
+                    parse_mode="Markdown"
+                )
 
     except Exception as e:
         log.error(f"Voice handling error: {type(e).__name__}: {e}")
@@ -443,23 +554,56 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"_Error: {type(e).__name__}: {str(e)}_",
             parse_mode="Markdown"
         )
-        return
-
-    await process_user_input(transcript, update, context)
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_chat.id) != str(TELEGRAM_CHAT_ID):
         return
     if update.message.text.startswith("/"):
         return
-    await process_user_input(update.message.text, update, context)
+
+    text = update.message.text.strip()
+    conv = load_conv()
+
+    if conv["active"]:
+        await process_user_input(text, update, context)
+    else:
+        # Check if it's a task addition via text
+        detection = detect_task_addition(text)
+        if detection.get("is_task") and detection.get("week") and detection.get("task"):
+            week = int(detection["week"])
+            task = detection["task"]
+            milestones = get_milestones()
+
+            if week not in milestones:
+                await update.message.reply_text(
+                    f"_Week {week} doesn't exist. Valid weeks are 1-7._",
+                    parse_mode="Markdown"
+                )
+                return
+
+            success = add_task_to_week(week, task)
+            if success:
+                await update.message.reply_text(
+                    f"✅ *Added to Week {week}*\n\n_{task}_",
+                    parse_mode="Markdown"
+                )
+            else:
+                await update.message.reply_text(
+                    "_Failed to add task. Try again._",
+                    parse_mode="Markdown"
+                )
+        else:
+            await update.message.reply_text(
+                "_No active debrief. Send /checkin to start._\n"
+                "_Or say \"add [task] to week [N]\" to add a task._",
+                parse_mode="Markdown"
+            )
 
 async def send_checkin_prompt(bot: Bot):
-    """Fires on Wednesday 09:00 — starts the debrief."""
     week = current_week()
-    title = MILESTONES[week]["title"]
+    milestones = get_milestones()
+    title = milestones.get(week, {}).get("title", f"Week {week}")
 
-    # Initialise conversation state
     save_conv({
         "active": True,
         "exchanges": [],
@@ -491,13 +635,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = (
             "✅ *SwitchToAI Check-In Bot initialised.*\n\n"
             f"Start date: *{p['start_date']}*\n"
-            "Weekly debrief: every Wednesday at 09:00 London time.\n\n"
+            "Weekly debrief: every Tuesday at 09:00 London time.\n\n"
             "I ask questions. You answer by voice note or text. "
             f"After {MAX_EXCHANGES} exchanges you get the full verdict.\n\n"
             "*/checkin* — start a manual debrief now\n"
             "*/status* — current week and progress bars\n"
             "*/progress* — full history\n"
-            "*/cancel* — end current debrief"
+            "*/cancel* — end current debrief\n\n"
+            "_Outside a debrief, say \"add [task] to week [N]\" to update your plan._"
         )
     else:
         msg = f"Already running. Week {current_week()}. Use /checkin to debrief now."
@@ -515,6 +660,7 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     p = load_progress()
     week = current_week()
+    milestones = get_milestones()
     lines = [f"📊 *Status — Week {week} of 7*\n"]
     for w in range(1, week + 1):
         wk = str(w)
@@ -529,6 +675,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
     p = load_progress()
+    milestones = get_milestones()
     weeks_data = p.get("weeks", {})
     if not weeks_data:
         await update.message.reply_text("No debriefs on record yet.")
@@ -536,12 +683,40 @@ async def cmd_progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = ["📚 *Full Debrief History*\n"]
     for w in sorted(weeks_data.keys(), key=int):
         e = weeks_data[w]
-        lines.append(f"*Week {w} — {MILESTONES[int(w)]['title']}*")
+        title = milestones.get(int(w), {}).get("title", f"Week {w}")
+        lines.append(f"*Week {w} — {title}*")
         lines.append(f"Date: {e.get('date', '—')}  |  {e['ticked_count']}/{e['total_tasks']} tasks")
         if e.get("missed"):
             preview = ', '.join(e['missed'][:2])
             lines.append(f"Outstanding: {preview}{'...' if len(e['missed']) > 2 else ''}")
         lines.append("")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+async def cmd_showtasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show all tasks for a specific week. Usage: /showtasks 3"""
+    if str(update.effective_chat.id) != str(TELEGRAM_CHAT_ID):
+        return
+
+    args = context.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text(
+            "_Usage: /showtasks N — e.g. /showtasks 3_",
+            parse_mode="Markdown"
+        )
+        return
+
+    week = int(args[0])
+    milestones = get_milestones()
+
+    if week not in milestones:
+        await update.message.reply_text(f"_Week {week} not found._", parse_mode="Markdown")
+        return
+
+    data = milestones[week]
+    lines = [f"📋 *Week {week} — {data['title']}*\n"]
+    for i, task in enumerate(data["tasks"], 1):
+        lines.append(f"{i}. {task}")
+
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 # ─── MAIN ────────────────────────────────────────────────────────────────────
@@ -552,11 +727,12 @@ async def main():
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start",    cmd_start))
-    app.add_handler(CommandHandler("checkin",  cmd_checkin))
-    app.add_handler(CommandHandler("cancel",   cmd_cancel))
-    app.add_handler(CommandHandler("status",   cmd_status))
-    app.add_handler(CommandHandler("progress", cmd_progress))
+    app.add_handler(CommandHandler("start",      cmd_start))
+    app.add_handler(CommandHandler("checkin",    cmd_checkin))
+    app.add_handler(CommandHandler("cancel",     cmd_cancel))
+    app.add_handler(CommandHandler("status",     cmd_status))
+    app.add_handler(CommandHandler("progress",   cmd_progress))
+    app.add_handler(CommandHandler("showtasks",  cmd_showtasks))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
@@ -572,7 +748,10 @@ async def main():
 
     await app.initialize()
     await app.start()
-    await app.updater.start_polling(drop_pending_updates=True)
+    await app.updater.start_polling(
+        drop_pending_updates=True,
+        allowed_updates=["message"],
+    )
 
     log.info("JARVIS online.")
     try:
