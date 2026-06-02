@@ -16,8 +16,7 @@ Outside debrief:
 """
 
 import os
-print("SUPABASE_URL repr:", repr(SUPABASE_URL))
-print("HAS SUPABASE KEY:", bool(SUPABASE_KEY))
+
 import json
 import logging
 import asyncio
@@ -34,7 +33,8 @@ from telegram.ext import (
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-
+print("SUPABASE_URL repr:", repr(SUPABASE_URL))
+print("HAS SUPABASE KEY:", bool(SUPABASE_KEY))
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
