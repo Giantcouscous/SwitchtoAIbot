@@ -16,6 +16,8 @@ Outside debrief:
 """
 
 import os
+print("SUPABASE_URL repr:", repr(SUPABASE_URL))
+print("HAS SUPABASE KEY:", bool(SUPABASE_KEY))
 import json
 import logging
 import asyncio
@@ -41,8 +43,7 @@ ANTHROPIC_API_KEY  = os.environ["ANTHROPIC_API_KEY"]
 OPENAI_API_KEY     = os.environ["OPENAI_API_KEY"]
 SUPABASE_URL       = os.environ["SUPABASE_URL"]
 SUPABASE_KEY       = os.environ["SUPABASE_KEY"]
-print("SUPABASE_URL repr:", repr(SUPABASE_URL))
-print("HAS SUPABASE KEY:", bool(SUPABASE_KEY))
+
 
 CHECKIN_HOUR   = 9
 CHECKIN_MINUTE = 0
