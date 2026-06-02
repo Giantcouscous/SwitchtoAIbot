@@ -33,8 +33,10 @@ from telegram.ext import (
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-print("SUPABASE_URL repr:", repr(SUPABASE_URL))
-print("HAS SUPABASE KEY:", bool(SUPABASE_KEY))
+print("SUPABASE_URL repr:", repr(SUPABASE_URL)), flush=True)
+print("HAS SUPABASE KEY:", bool(SUPABASE_KEY)), flush=True)
+print("HAS TELEGRAM_BOT_TOKEN:", bool(os.getenv("TELEGRAM_BOT_TOKEN")), flush=True)
+print("HAS TELEGRAM_CHAT_ID:", bool(os.getenv("TELEGRAM_CHAT_ID")), flush=True)
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
